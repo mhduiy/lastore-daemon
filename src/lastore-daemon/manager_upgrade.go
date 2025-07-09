@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -590,6 +591,7 @@ type ostreeRollbackData struct {
 	Time        int64  `json:"time"`
 	Name        string `json:"name"`
 	Auto        bool   `json:"auto"`
+	Reboot      bool   `json:"reboot"`
 }
 
 type ostreeResponse struct {
@@ -623,11 +625,11 @@ func osTreeRollback() error {
 	return nil
 }
 
-func osTreeParseRollbackData() (*ostreeRollbackData, error) {
+func osTreeParseRollbackData() (*ostreeRollbackData, []string, error) {
 	out, err := osTreeCmd([]string{"admin", "rollback", "--can-rollback", "-j"})
 	if err != nil {
 		logger.Warning("osTreeCmd failed:", err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	logger.Info("osTree rollback output:", out)
@@ -636,26 +638,38 @@ func osTreeParseRollbackData() (*ostreeRollbackData, error) {
 	err = json.Unmarshal([]byte(out), &resp)
 	if err != nil {
 		logger.Warning("unmarshal ostree response failed:", err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	if resp.Error != nil {
 		logger.Warning("ostree response has error:", resp.Error)
-		return nil, fmt.Errorf("ostree error: %v", resp.Error)
+		return nil, nil, fmt.Errorf("ostree error: %v", resp.Error)
 	}
 
 	var data ostreeRollbackData
 	err = json.Unmarshal(resp.Data, &data)
 	if err != nil {
 		logger.Warning("unmarshal rollback data failed:", err)
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &data, nil
+	var rawData map[string]interface{}
+	err = json.Unmarshal(resp.Data, &rawData)
+	if err != nil {
+		logger.Warning("unmarshal raw data failed:", err)
+		return &data, nil, nil
+	}
+
+	var fieldList []string
+	for key := range rawData {
+		fieldList = append(fieldList, key)
+	}
+
+	return &data, fieldList, nil
 }
 
 func osTreeCanRollback() (bool, string) {
-	data, err := osTreeParseRollbackData()
+	data, _, err := osTreeParseRollbackData()
 	if err != nil {
 		return false, ""
 	}
@@ -668,12 +682,18 @@ func osTreeCanRollback() (bool, string) {
 	return data.CanRollback, string(rawData)
 }
 
-func osTreeIsAutoRollback() bool {
-	data, err := osTreeParseRollbackData()
+func osTreeNeedRebootAfterRollback() bool {
+	data, fieldList, err := osTreeParseRollbackData()
 	if err != nil {
 		return false
 	}
-	return data.Auto
+
+	// 兼容旧版本
+	if !slices.Contains(fieldList, "reboot") {
+		return !data.Auto
+	}
+
+	return data.Reboot
 }
 
 func (m *Manager) preUpgradeCmdSuccessHook(job *Job, needChangeGrub bool, mode system.UpdateType, uuid string) error {
